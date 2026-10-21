@@ -66,7 +66,8 @@ type consumption struct {
 	protoFile    string
 	protoMessage string
 
-	decode []string // schema-registry decode: "key" and/or "value"
+	decode  []string // schema-registry decode: "key" and/or "value"
+	msgpack bool
 }
 
 // Command returns a consume command.
@@ -313,6 +314,7 @@ func (c *consumption) run(topics []string) error {
 		printControlRecords: c.printControlRecords,
 		timeout:             c.timeout,
 		shareAck:            shareAck,
+		msgpack:             c.msgpack,
 		done:                make(chan struct{}),
 		ctx:                 ctx,
 		cancel:              cancel,
@@ -658,6 +660,9 @@ type consumeOutput struct {
 
 	pbd *pbDecoder
 
+	msgpack        bool
+	msgpackDecoded bool
+
 	dec           *serde.Decoder
 	decodeValue   bool
 	decodeKey     bool
@@ -681,17 +686,22 @@ func (co *consumeOutput) srDecode(b []byte, what string) []byte {
 	if err != nil {
 		if !errors.Is(err, sr.ErrBadHeader) {
 			msg := fmt.Sprintf("unable to schema-decode %s: %v", what, err)
-			if co.decodeErrSeen == nil {
-				co.decodeErrSeen = make(map[string]struct{})
-			}
-			if _, seen := co.decodeErrSeen[msg]; !seen {
-				co.decodeErrSeen[msg] = struct{}{}
-				fmt.Fprintln(os.Stderr, msg)
-			}
+			co.reportDecodeError(msg)
 		}
 		return b
 	}
 	return json
+}
+
+func (co *consumeOutput) reportDecodeError(msg string) {
+	if co.decodeErrSeen == nil {
+		co.decodeErrSeen = make(map[string]struct{})
+	}
+
+	if _, seen := co.decodeErrSeen[msg]; !seen {
+		co.decodeErrSeen[msg] = struct{}{}
+		fmt.Fprintln(os.Stderr, msg)
+	}
 }
 
 // stop signals the consume loop to finish and unblocks run. It mirrors what
@@ -885,6 +895,11 @@ func (co *consumeOutput) consume() {
 						r.Value = co.srDecode(r.Value, "value")
 					}
 				}
+
+				if co.msgpack {
+					r.Value, co.msgpackDecoded = co.msgpackDecode(r.Value)
+				}
+
 				co.format(r, &p.FetchPartition)
 
 				if co.num == co.max {

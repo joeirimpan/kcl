@@ -50,7 +50,11 @@ func (c *consumption) command() *cobra.Command {
 	cmd.Flags().StringVar(&c.protoMessage, "proto-message", "", "the proto.message structure in --proto-file to use for decoding, requires --proto-file")
 	cmd.Flags().StringSliceVar(&c.decode, "decode", nil, "decode key and/or value from the Schema Registry wire format to JSON; bare --decode does both, or --decode=key / --decode=value (uses -R/--registry)")
 	cmd.Flags().Lookup("decode").NoOptDefVal = "key,value"
+	cmd.Flags().BoolVar(&c.msgpack, "msgpack", false, "decode MessagePack values to JSON, leaving keys unchanged")
 	cmd.MarkFlagsRequiredTogether("proto-file", "proto-message")
+	cmd.MarkFlagsMutuallyExclusive("msgpack", "proto-file")
+	cmd.MarkFlagsMutuallyExclusive("msgpack", "decode")
+
 	return cmd
 }
 
@@ -223,8 +227,22 @@ plain field is omitted -- check which field is present rather than assuming.
 Header values follow the same rule. "delivery_count" is included only when
 --share-group is used.
 
-With --decode, a component that decoded to JSON is embedded as a JSON value
+With --decode or --msgpack, a component that decoded to JSON is embedded as a JSON value
 rather than a string, so "jq .value.count" works without fromjson.
+
+
+MESSAGEPACK
+
+Use --msgpack to decode record values from MessagePack to JSON. Keys are left
+unchanged. No schema or registry is needed; nested maps and arrays are decoded,
+binary fields become base64 strings, and timestamps become JSON time strings.
+Numeric enums remain numbers. Each value must contain exactly one MessagePack
+object. Null Kafka values (tombstones) are preserved. Invalid values are printed
+unchanged, with each distinct decoding error reported once on stderr.
+This flag cannot be combined with --decode or --proto-file.
+
+  kcl consume orders --msgpack
+  kcl consume orders --msgpack -f json
 
 
 SCHEMA REGISTRY

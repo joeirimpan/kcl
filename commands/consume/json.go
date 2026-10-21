@@ -62,9 +62,9 @@ var jsonNull = json.RawMessage("null")
 //   - nil is JSON null. A nil component and an empty one are distinct on the
 //     wire -- the record-batch decode preserves it -- so they stay distinct
 //     here: nil is null, empty is "".
-//   - If decoded is true, the bytes came back from a Schema Registry decode
-//     and are already JSON text, so they are embedded as a JSON value. This
-//     is what makes `jq .value.count` work rather than requiring fromjson.
+//   - If decoded is true, the bytes came back from a decoder as JSON text,
+//     so they are embedded as a JSON value. This makes `jq .value.count`
+//     work rather than requiring fromjson.
 //     A decode that failed leaves the original bytes behind, so validity is
 //     re-checked rather than assumed.
 //   - Valid UTF-8 becomes a JSON string.
@@ -101,7 +101,7 @@ func (co *consumeOutput) buildJSONFormatFn(shareGroup bool) {
 			LeaderEpoch: r.LeaderEpoch,
 		}
 		j.Key, j.KeyBase64 = encodeComponent(r.Key, co.decodeKey)
-		j.Value, j.ValueBase64 = encodeComponent(r.Value, co.decodeValue)
+		j.Value, j.ValueBase64 = encodeComponent(r.Value, co.decodeValue || co.msgpackDecoded)
 		if len(r.Headers) > 0 {
 			j.Headers = make([]jsonHeader, 0, len(r.Headers))
 			for _, h := range r.Headers {

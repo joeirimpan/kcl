@@ -9,6 +9,7 @@ require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
+	github.com/tinylib/msgp v1.6.4
 	github.com/twmb/avro v1.9.0
 	github.com/twmb/franz-go v1.22.1
 	github.com/twmb/franz-go/pkg/kadm v1.19.0
@@ -39,6 +40,7 @@ require (
 	github.com/jhump/protoreflect/v2 v2.0.0-beta.2 // indirect
 	github.com/klauspost/compress v1.20.1 // indirect
 	github.com/petermattis/goid v0.0.0-20260918085751-abfca077860b // indirect
+	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.31 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect

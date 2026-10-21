@@ -260,6 +260,22 @@ docker run -d --name redpanda -p 9092:9092 -p 8081:8081 \
 kcl -R http://localhost:8081 registry subject list
 ```
 
+## MessagePack
+
+For MessagePack values, use `--msgpack` to decode to JSON without a schema or
+registry. Keys stay unchanged. Nested maps are preserved, binary fields become
+base64 strings, timestamps become JSON time strings, and numeric enums remain
+numbers. With `-f json`, decoded values are embedded as JSON rather than quoted
+strings. Null Kafka values are preserved; invalid values retain their original
+bytes and report each distinct decoding error once on stderr. Each value must
+contain exactly one MessagePack object. `--msgpack` cannot be combined with
+`--decode` or `--proto-file`.
+
+```sh
+kcl consume orders --msgpack
+kcl consume orders --msgpack -f json | jq .value
+```
+
 ## Local Fake Cluster
 
 `kcl fake` runs a [kfake][4] cluster in-process and prints the listen
