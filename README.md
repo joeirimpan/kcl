@@ -128,6 +128,45 @@ kcl -C cicd topic list          # switches to "cicd" for one command
 kcl -B other-host:9092 topic list   # one-off override of seed brokers
 ```
 
+### SSH tunnels
+
+Kafka returns broker addresses in metadata, so forwarding only the bootstrap
+connection is not enough to reach a cluster through SSH. Use the repeatable
+`--broker-map SOURCE:PORT=TARGET:PORT` flag to redirect broker connections to
+local forwards. It applies to bootstrap addresses and discovered brokers for
+all Kafka commands. Addresses without a mapping connect normally.
+
+For example, open three forwards through a host that can reach the brokers:
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:19092:10.0.0.11:9092 \
+  -L 127.0.0.1:19093:10.0.0.12:9092 \
+  -L 127.0.0.1:19094:10.0.0.13:9092 \
+  user@bastion
+```
+
+In another terminal, use the exact addresses the brokers advertise as the
+mapping sources:
+
+```sh
+kcl -B 10.0.0.11:9092 \
+  --broker-map 10.0.0.11:9092=127.0.0.1:19092 \
+  --broker-map 10.0.0.12:9092=127.0.0.1:19093 \
+  --broker-map 10.0.0.13:9092=127.0.0.1:19094 \
+  consume orders --msgpack -o end -n 10
+```
+
+Mappings match exact host:port strings, apply once, and require explicit ports
+on both sides. IPv6 addresses use brackets, such as
+`--broker-map '[2001:db8::1]:9092=[::1]:19092'`. Duplicate sources are rejected.
+These mappings are command-line options and are not saved in profiles.
+
+Keep your usual SASL/TLS settings. TLS verifies the original broker hostname,
+unless `tls.server_name` overrides it; using the original broker address for
+`-B` also preserves the correct TLS identity during bootstrap. Mapping changes
+only the connection destination and does not create the SSH tunnels.
+
 ## Autocompletion
 
 Thanks to [cobra][3], autocompletion exists for bash, zsh, and powershell.

@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"maps"
-	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -246,6 +245,7 @@ type Client struct {
 	envPfx           string
 	flagOverrides    []string
 	bootstrapServers []string // --bootstrap-servers/-B override
+	brokerMaps       []string
 	registryURLs     []string // --registry/-R override
 	registryContext  string   // registry --context override
 	profileName      string   // --context/-C override
@@ -377,6 +377,7 @@ func New(root *cobra.Command) *Client {
 	root.PersistentFlags().StringVar(&c.envPfx, "config-env-prefix", "KCL_", "environment variable prefix for config overrides (middle priority)")
 	root.PersistentFlags().StringArrayVarP(&c.flagOverrides, "config-opt", "X", nil, "flag provided config option (highest priority)")
 	root.PersistentFlags().StringSliceVarP(&c.bootstrapServers, "bootstrap-servers", "B", nil, "comma-separated list of seed brokers (overrides profile/config); shorthand for -X seed_brokers=...")
+	root.PersistentFlags().StringArrayVar(&c.brokerMaps, "broker-map", nil, "connect to a different address for a broker: HOST:PORT=HOST:PORT (repeatable; applies to bootstrap and discovered brokers)")
 	root.PersistentFlags().StringSliceVarP(&c.registryURLs, "registry", "R", nil, "comma-separated list of schema registry URLs (overrides profile/config); shorthand for -X registry.urls=...")
 	root.PersistentFlags().StringVar(&c.asVersion, "as-version", "", "if nonempty, which version of Kafka versions to use (e.g. '0.8.0', '2.3.0')")
 	root.PersistentFlags().StringVar(&c.format, "format", "text", "output format (text, json, awk, awk-header)")
@@ -554,20 +555,22 @@ func (c *Client) fillOpts() {
 		c.dieErr(fmt.Errorf("sasl error: %w", err))
 	}
 
+	brokerMap, err := parseBrokerMaps(c.brokerMaps)
+	if err != nil {
+		c.die(out.ExitUsage, "%v", err)
+	}
+
 	tlscfg, err := c.loadTLS()
 	if err != nil {
 		c.dieErr(err)
-	} else if tlscfg != nil {
-		dialer := &net.Dialer{Timeout: 10 * time.Second}
-		c.AddOpt(kgo.Dialer(func(_ context.Context, _, host string) (net.Conn, error) {
-			cloned := tlscfg.Clone()
-			if c.cfg.TLS.ServerName != "" {
-				cloned.ServerName = c.cfg.TLS.ServerName
-			} else if h, _, err := net.SplitHostPort(host); err == nil {
-				cloned.ServerName = h
-			}
-			return tls.DialWithDialer(dialer, "tcp", host, cloned)
-		}))
+	}
+
+	if tlscfg != nil {
+		tlscfg.ServerName = c.cfg.TLS.ServerName
+	}
+
+	if tlscfg != nil || len(brokerMap) > 0 {
+		c.AddOpt(kgo.Dialer(newBrokerDialer(brokerMap, tlscfg, c.cfg.DialTimeout.D())))
 	}
 
 	c.AddOpt(kgo.SeedBrokers(c.cfg.SeedBrokers...))
