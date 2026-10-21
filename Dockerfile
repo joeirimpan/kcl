@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 	go build -ldflags "-X main.version=${VERSION}" -o /out/kcl .
 
 # distroless/static: no shell, no package manager, just a CA bundle -- kcl is
-# a static binary and only needs certs for TLS-secured Kafka/Schema Registry.
+# a static binary and only needs certs for TLS-secured Kafka.
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/kcl /usr/local/bin/kcl
 ENTRYPOINT ["/usr/local/bin/kcl"]

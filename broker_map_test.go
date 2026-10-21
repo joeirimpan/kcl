@@ -1,11 +1,10 @@
-package client
+package main
 
 import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -17,11 +16,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/spf13/cobra"
-	"github.com/twmb/franz-go/pkg/kfake"
-	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 func TestParseBrokerMaps(t *testing.T) {
@@ -236,105 +230,4 @@ func forwardBroker(t *testing.T, target string) (string, *atomic.Int32) {
 	})
 
 	return listener.Addr().String(), &connections
-}
-
-func TestBrokerMapThreeBrokers(t *testing.T) {
-	var targets []string
-	cluster, err := kfake.NewCluster(
-		kfake.NumBrokers(3),
-		kfake.SeedTopics(3, "mapped"),
-		kfake.EnableSASL(),
-		kfake.Superuser("PLAIN", "test", "test-pass"),
-		kfake.ListenFn(func(network, address string) (net.Listener, error) {
-			listener, err := net.Listen(network, address)
-			if err != nil {
-				return nil, err
-			}
-
-			targets = append(targets, listener.Addr().String())
-			advertised := &net.TCPAddr{IP: net.IPv4(192, 0, 2, byte(len(targets))), Port: 9092}
-			return advertisedBrokerListener{Listener: listener, address: advertised}, nil
-		}),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(cluster.Close)
-
-	addresses := cluster.ListenAddrs()
-	var mappings, forwards []string
-	var counters []*atomic.Int32
-	for i, target := range targets {
-		forward, counter := forwardBroker(t, target)
-		mappings = append(mappings, "--broker-map", addresses[i]+"="+forward)
-		forwards = append(forwards, forward)
-		counters = append(counters, counter)
-	}
-
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-	defer cancel()
-
-	for _, seed := range []string{addresses[0], forwards[0]} {
-		t.Run(seed, func(t *testing.T) {
-			root := &cobra.Command{Use: "kcl"}
-			client := New(root)
-			args := append([]string{
-				"--no-config-file", "--config-env-prefix", "KCL_BROKER_MAP_TEST_",
-				"-B", seed,
-				"-X", "sasl.mechanism=plain", "-X", "sasl.user=test", "-X", "sasl.pass=test-pass",
-			}, mappings...)
-			if err := root.ParseFlags(args); err != nil {
-				t.Fatal(err)
-			}
-
-			client.AddOpt(kgo.RecordPartitioner(kgo.ManualPartitioner()))
-			client.AddOpt(kgo.ConsumeTopics("mapped"))
-			cl := client.Client()
-			defer cl.Close()
-
-			meta, err := kmsg.NewPtrMetadataRequest().RequestWith(ctx, cl)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			leaders := make(map[int32]bool)
-			for _, topic := range meta.Topics {
-				for _, partition := range topic.Partitions {
-					leaders[partition.Leader] = true
-				}
-			}
-			if len(leaders) != 3 {
-				t.Fatalf("expected partitions on three brokers, got leaders %v", leaders)
-			}
-
-			for partition := range int32(3) {
-				record := &kgo.Record{Topic: "mapped", Partition: partition, Value: []byte(fmt.Sprint(partition))}
-				if err := cl.ProduceSync(ctx, record).FirstErr(); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			seen := make(map[int32]bool)
-			for len(seen) < 3 {
-				fetches := cl.PollFetches(ctx)
-				if errs := fetches.Errors(); len(errs) > 0 {
-					t.Fatal(errs)
-				}
-
-				fetches.EachRecord(func(record *kgo.Record) {
-					if string(record.Value) != fmt.Sprint(record.Partition) {
-						t.Errorf("partition %d value = %q", record.Partition, record.Value)
-					}
-
-					seen[record.Partition] = true
-				})
-			}
-		})
-	}
-
-	for i, counter := range counters {
-		if counter.Load() == 0 {
-			t.Errorf("broker %s was never reached through its forward", addresses[i])
-		}
-	}
 }

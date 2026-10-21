@@ -1,160 +1,23 @@
 # kcl development context
 
-## Audit every change against this list
+This repository is a direct Kafka consumer. Keep production Go code in
+`consume.go`; tests may use separate `*_test.go` files. Do not add producing,
+admin commands, groups, commits, or general client option injection.
 
-Most drift in this repo comes from a new command quietly skipping one of
-these rather than from anyone deciding against it. Walk the list before
-calling a change done, and say which items do not apply and why.
+Every connection must retain the read-only request guard, including TLS and
+mapped broker connections. Metadata must disable topic auto-creation. Unknown
+APIs and unsupported protocol encodings must fail closed. Keep broker-map
+addresses, examples, and tests generic.
 
-- [ ] Does the command honor `--format text|json|awk`?
-- [ ] Do its errors respect the format, and use the right exit code?
-- [ ] Does its help follow the `EXAMPLES:` / `SEE ALSO:` shape?
-- [ ] Does it change an awk or JSON shape? The PR description says so
-      under CHANGED, naming the columns or keys, so the changelog can.
-- [ ] Are there sibling commands that should have gotten the same change?
-- [ ] Do the tests cover the paths you only exercised by hand?
-- [ ] Did you build it and use it?
+Use explicit partition assignments. Offset bounds are per partition with an
+exclusive end; bounded reads snapshot the available log at startup. Raw keys
+and values must survive failed decoding. Propagate output errors.
 
-The last two are the ones that bite. Twice in the fake control work a
-smoke test found a bug the unit tests missed, because the tests covered
-the HTTP layer and the bug was in argument handling above it.
+Separate distinct logical steps with a blank line. Keep operations with their
+immediate error checks. Follow the Go comment style skill when editing comments,
+and run gofmt. Test against local kfake brokers; never use production clusters
+for verification. Run `go test -race -count=1 ./...`, `go vet ./...`, and build
+`/tmp/kcl`. Keep the version variable compatible with release.sh and Dockerfile.
 
-Build the binary and drive it the way a user would, against an empty
-config dir and against `kcl fake`: the first run with nothing configured,
-the bare group command, the typo, the flag given twice, the value left
-empty, `--format json` on the error path, and the copy of the hint text
-pasted back in. Read the output as a stranger. The profile work shipped
-with unit tests green and still had `-B` applied twice, `0s` written for
-every unset timeout, a flagless create that bricked the default, and
-`tls.insecure=false` turning verification off; every one of those fell out
-of ten minutes at the prompt. Report what felt wrong even when it is not
-in scope, and fix what is.
-
-## Output
-
-`--format` is a root persistent flag (`client/client.go:298`), not part of
-`Cfg`, so it is unrelated to the TOML file and `-X`. A command holding a
-`*client.Client` reads it with `cl.Format()`; a command without one reads
-`cmd.Flags().GetString("format")`, since cobra hands down root's persistent
-flags.
-
-Tabular output goes through `out.NewFormattedTable`, which renders all
-three formats from one set of rows. It models one flat table, so a command
-whose output has sections or nesting (`topic describe`, `cluster metadata`)
-branches on `cl.Format()` by hand and calls `out.MarshalJSON` instead. Both
-are fine; a command with a single table that hand rolls it is not.
-
-Do not confuse the two mechanisms with a coverage gap. Every command emits
-valid JSON under `--format json` today, verified by running the read-only
-commands against `kcl fake` and parsing their stdout. If you change that,
-you have broken something.
-
-`out.MarshalJSON` covers non-tabular JSON, and both it and the table put
-`_command` and `_version` at the top level. All JSON output is one line;
-pipe to jq when you want it wide.
-
-`text` is for people and may change between releases. `awk` is the stable
-scripting contract: TSV, no headers, stable column order, and `-` for an
-empty or unknown cell. Every table registers its awk columns with
-`out.Columns` or `out.ColumnsFunc` next to its flags, and `--format
-awk-header` prints them and exits before anything is dialed;
-`NewFormattedTable` checks the runtime headers against the registration.
-
-A mutating command's rows end in ERROR and MESSAGE through
-`ResultColumns` (text prints OK on success); a read-only table ends in
-ERROR through `ErrorColumn` (text prints nothing). ERROR is the bare kerr
-name from `out.ErrName`, MESSAGE the broker's text from
-`out.BrokerMessage`, and `Flush` returns `ErrSilent` when any ERROR is
-set, so the command exits 1.
-
-## Commands
-
-Every command but `kcl fake` takes a `*client.Client`. `fake` does not,
-deliberately: it does not connect to a cluster, it is one, so it has no
-business reading seed brokers, TLS, or SASL. Flags only. That is also why
-it must not grow config keys or read `KCL_*` variables of its own, which
-would collide with the names `client.go:1011` derives from config keys.
-
-`Short` is a sentence ending in a period (115 of 116 do). `Long` opens by
-repeating the short description as its own line, then explains, then:
-
-```
-EXAMPLES:
-  kcl foo bar                      # what it does
-
-SEE ALSO:
-  kcl related        one line
-```
-
-17 files use `EXAMPLES:` and 9 use `SEE ALSO:`, and nothing uses a bare
-heading without the colon any more. Keep it that way.
-
-Two overlaps are deliberate, not drift. `kcl consume` and `kcl produce` own
-`-f, --format`, the record template and the input format, which shadows
-root's `--format` for those two commands only; an audit must not flag it.
-`kcl topic delete` has no prompt and no `-y`, unlike `acl delete` and
-`group seek`, because you name the topics on the command line: the scope is
-known before the command runs, where an ACL filter or a group seek only
-learns what it matched after asking the cluster.
-
-Renames keep the old name working as a `Hidden`/`Deprecated` cobra command
-or flag, so no script breaks, and `out.AliasOf` marks the old command, or
-the top of an old subtree, with the path it forwards to, so `_command` is
-the new path. `--help-json` (`main.go:203`) dumps the whole tree,
-`main_test.go` pins that hidden commands stay marked, and the walkthrough
-runs every hidden leaf and flag and fails on one it cannot map.
-
-## Errors and exit codes
-
-`out.ExitOK` 0, `out.ExitError` 1 for a Kafka-level failure, `out.ExitUsage`
-2 for bad flags, arguments, or parse failures. Return `out.Errf(code, ...)`
-rather than a bare `fmt.Errorf` when the exit code matters. Every error a
-command returns reaches `out.HandleError`, which writes the
-`{_command,_version,code,error}` document when the format is JSON; there
-is no other JSON error path.
-
-## Tests
-
-Table-driven with an anonymous struct slice and `t.Run` per case, matching
-`commands/fake/fake_test.go`. Integration tests stand up a real `kfake`
-cluster and a real `kgo` client rather than mocking. Send test output to a
-file and grep the file; piping `go test` through grep throws away the
-stack traces you will want.
-
-## Environment
-
-Go 1.27. That gets us the stdlib `uuid` package (import `"uuid"`, not
-`crypto/uuid`), which parses bare hex, dashed, uppercase, `urn:uuid:` and
-braced forms, and `encoding/json/v2`. In v2, `omitempty` does not drop a
-`false` or a `0`; `omitzero` does, and is what you almost always want.
-`RejectUnknownMembers(true)` turns a misspelled field into an error instead
-of a silent drop, and v2 matches field names case sensitively.
-
-`kerr` names error 6 `NOT_LEADER_FOR_PARTITION`, the name Kafka used before
-2.6. There is no name to code lookup in `kerr` or `kmsg`; build the reverse
-map by walking codes, and skip codes that do not answer to themselves,
-since an unknown code answers `UNKNOWN_SERVER_ERROR` rather than nil.
-
-## CHANGELOG
-
-The maintainer writes each release's section at release time from the PR
-descriptions; a PR does not edit CHANGELOG.md. Sections are `BREAKING`,
-`NEW`, `CHANGED`, `FIXES`, `UPSTREAM`. `BREAKING` is an invocation that no
-longer runs: a removed command or flag, or an argument now rejected. A
-changed column, key, type, or exit code is `CHANGED`. Bullets run
-about 20 words and say what changed, not why: the why lives in the commit
-message, and a past release was rewritten for running 34 words a bullet
-explaining itself. PR descriptions follow the same rule.
-
-## rpk and Redpanda
-
-rpk is BSL licensed, so never copy its code and never present kcl as derived
-from it. That is the whole of the rule.
-
-Naming it is fine, and the tree does in several places. Flag help saying a
-default matches "the Java client, librdkafka, rpk, and kcat", or a CHANGELOG
-bullet saying a filter model is "as in rpk and kafka-acls.sh", cites what
-the ecosystem already does to justify a choice. The README's Redpanda docker
-snippet tells you how to run a broker. None of that is derivation, and none
-of it should be stripped. The blanket wording at the top of IMPROVEMENTS.md
-is about implementation, not about the name.
+The maintainer updates CHANGELOG.md at release time. Do not rewrite historical
+release notes as part of a code change. Do not copy BSL-licensed rpk code.
