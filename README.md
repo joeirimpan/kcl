@@ -57,6 +57,28 @@ removed the records needed to observe the boundary. Ctrl-C stops the consumer.
 Reads use Kafka's `read_uncommitted` isolation, so transactional data may include
 records from aborted or open transactions; transaction control records are hidden.
 
+## Record filtering
+
+`-G` / `--grep` filters records locally using Go regular expressions. Match an
+exact Kafka key with anchors; no base64 encoding is needed:
+
+```sh
+/tmp/kcl -B localhost:9092 events -p 0 -o :end -G 'k:^user-123$'
+/tmp/kcl -B localhost:9092 events -o :end -G 'k:^user-123$' -G '!v:warning'
+```
+
+Prefixes select the key (`k:`), value (`v:`), header key (`hk:`), header value
+(`hv:`), a named header's value (`h:NAME=`), or topic (`t:`). A leading `!`
+negates a filter. Repeated flags must all match (AND); use regex alternation
+such as `k:^(user-123|user-456)$` for OR. Escape regex metacharacters in literal
+keys. Patterns without anchors can match substrings.
+
+Filtering runs on the original bytes before MessagePack decoding and output
+formatting. `v:` does not query decoded JSON fields; use a downstream JSON
+filter for those. `-n` counts records that pass all `-G` filters. Bounded reads
+still finish when the final records do not match, including zero-match reads.
+Partition selection and broker fetches are unchanged by these local filters.
+
 ## Output and MessagePack
 
 The default output is the raw value followed by a newline. `-f` accepts franz-go

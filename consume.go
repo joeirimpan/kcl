@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,6 +33,7 @@ var version = "dev"
 type options struct {
 	brokers, mappings, topics []string
 	partitions                []int32
+	grepFilters               []grepFilter
 	offset, format            string
 	num                       int
 	timeout                   time.Duration
@@ -53,6 +55,7 @@ func main() {
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	var o options
+	var grepPatterns []string
 	var help, showVersion bool
 	flags := pflag.NewFlagSet("kcl", pflag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -63,6 +66,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags.IntVarP(&o.num, "num", "n", 0, "Stop after this many records (0 means unlimited)")
 	flags.DurationVar(&o.timeout, "timeout", 30*time.Second, "Idle timeout (0 disables; incomplete bounded reads fail)")
 	flags.StringVarP(&o.format, "format", "f", "%v\\n", "Record format, e.g. %k\\t%v\\n, or json")
+	flags.StringArrayVarP(&grepPatterns, "grep", "G", nil, "Record regex filter (k:, v:, hk:, hv:, h:NAME=, t:; ! negates; repeatable)")
 	flags.BoolVar(&o.msgpack, "msgpack", false, "Decode MessagePack values as JSON")
 	flags.StringVar(&o.mechanism, "sasl-mechanism", os.Getenv("KCL_SASL_MECHANISM"), "plain, scram-sha-256, scram-sha-512 (or KCL_SASL_MECHANISM)")
 	flags.StringVar(&o.user, "sasl-user", os.Getenv("KCL_SASL_USER"), "SASL username (or KCL_SASL_USER; password from KCL_SASL_PASS)")
@@ -106,6 +110,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 
 	spec, err := parseOffset(o.offset, time.Now())
+	if err != nil {
+		return err
+	}
+
+	o.grepFilters, err = parseGrepFilters(grepPatterns)
 	if err != nil {
 		return err
 	}
@@ -652,6 +661,10 @@ func consume(ctx context.Context, cl *kgo.Client, bounds map[topicPartition]offs
 							continue
 						}
 
+						if !matchAll(o.grepFilters, r) {
+							continue
+						}
+
 						if err := output.write(r, &p); err != nil {
 							return err
 						}
@@ -824,4 +837,145 @@ func decodeMessagePack(b []byte) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+// grepFilter is a single -G filter.
+type grepFilter struct {
+	negate bool
+	match  func(r *kgo.Record) bool
+}
+
+// parseGrepFilters parses -G flag values into compiled filters.
+// Syntax: [!]prefix:REGEX
+// Prefixes: k: (key), v: (value), hk: (header key), hv: (header value),
+// h:NAME= (specific header value), t: (topic).
+func parseGrepFilters(patterns []string) ([]grepFilter, error) {
+	var filters []grepFilter
+	for _, p := range patterns {
+		f, err := parseOneGrep(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid -G %q: %w", p, err)
+		}
+
+		filters = append(filters, f)
+	}
+
+	return filters, nil
+}
+
+func parseOneGrep(pattern string) (grepFilter, error) {
+	var f grepFilter
+	s := pattern
+
+	if strings.HasPrefix(s, "!") {
+		f.negate = true
+		s = s[1:]
+	}
+
+	switch {
+	case strings.HasPrefix(s, "k:"):
+		re, err := regexp.Compile(s[2:])
+		if err != nil {
+			return f, err
+		}
+
+		f.match = func(r *kgo.Record) bool {
+			return re.Match(r.Key)
+		}
+
+	case strings.HasPrefix(s, "v:"):
+		re, err := regexp.Compile(s[2:])
+		if err != nil {
+			return f, err
+		}
+
+		f.match = func(r *kgo.Record) bool {
+			return re.Match(r.Value)
+		}
+
+	case strings.HasPrefix(s, "hk:"):
+		re, err := regexp.Compile(s[3:])
+		if err != nil {
+			return f, err
+		}
+
+		f.match = func(r *kgo.Record) bool {
+			for _, h := range r.Headers {
+				if re.MatchString(h.Key) {
+					return true
+				}
+			}
+
+			return false
+		}
+
+	case strings.HasPrefix(s, "hv:"):
+		re, err := regexp.Compile(s[3:])
+		if err != nil {
+			return f, err
+		}
+
+		f.match = func(r *kgo.Record) bool {
+			for _, h := range r.Headers {
+				if re.Match(h.Value) {
+					return true
+				}
+			}
+
+			return false
+		}
+
+	case strings.HasPrefix(s, "h:"):
+		// h:NAME=REGEX matches a specific header's value.
+		name, pattern, ok := strings.Cut(s[2:], "=")
+		if !ok {
+			return f, fmt.Errorf("h: prefix requires NAME=REGEX format")
+		}
+
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return f, err
+		}
+
+		f.match = func(r *kgo.Record) bool {
+			for _, h := range r.Headers {
+				if h.Key == name && re.Match(h.Value) {
+					return true
+				}
+			}
+
+			return false
+		}
+
+	case strings.HasPrefix(s, "t:"):
+		re, err := regexp.Compile(s[2:])
+		if err != nil {
+			return f, err
+		}
+
+		f.match = func(r *kgo.Record) bool {
+			return re.MatchString(r.Topic)
+		}
+
+	default:
+		return f, fmt.Errorf("unknown prefix; use k:, v:, hk:, hv:, h:NAME=, or t:")
+	}
+
+	return f, nil
+}
+
+// matchAll returns true if the record matches all filters (AND logic).
+func matchAll(filters []grepFilter, r *kgo.Record) bool {
+	for _, f := range filters {
+		m := f.match(r)
+		if f.negate {
+			m = !m
+		}
+
+		if !m {
+			return false
+		}
+	}
+
+	return true
 }

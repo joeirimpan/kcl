@@ -222,6 +222,11 @@ func TestDirectConsume(t *testing.T) {
 		{"empty topic", []string{"empty", "-o", ":end"}, 0, nil, ""},
 		{"clamped end", []string{"events", "-p", "2", "-o", "3:100"}, 2, []int64{3, 4}, ""},
 		{"idle tail", []string{"events", "--timeout", "100ms"}, 0, nil, ""},
+		{"grep exact key", []string{"events", "-p", "1", "-o", "1:4", "-G", "k:^key$"}, 3, []int64{1, 2, 3}, ""},
+		{"grep no matches finishes", []string{"events", "-p", "0", "-o", ":end", "-G", "k:^absent$"}, 0, nil, ""},
+		{"grep count after matching", []string{"events", "-p", "0", "-o", ":end", "-n", "1", "-G", "v:^[23]$"}, 1, []int64{2}, ""},
+		{"grep combined", []string{"events", "-p", "2", "-o", ":end", "--grep", "k:^key$", "-G", "!v:^[024]$"}, 2, []int64{1, 3}, ""},
+		{"grep excludes end record", []string{"events", "-p", "0", "-o", "1:4", "-G", "v:^1$"}, 1, []int64{1}, ""},
 		{"missing partition", []string{"events", "-p", "99"}, 0, nil, "no partition 99"},
 		{"missing topic", []string{"missing"}, 0, nil, "UNKNOWN_TOPIC_OR_PARTITION"},
 	} {
@@ -397,6 +402,7 @@ func TestRejectGroupAndInvalidOptions(t *testing.T) {
 		{"events", "-X", "group.id=group"}, {"events", "--transactional-id", "tx"},
 		{"events", "-p", "-1"}, {"events", "-n", "-1"},
 		{"events", "--timeout", "-1s"}, {"events", "--broker-map", "bad"},
+		{"events", "-G", "k:[invalid"}, {"events", "--grep", "unknown:value"},
 		{"events", "--tls-cert", "cert"}, {"events", "--sasl-mechanism", "plain"},
 	} {
 		if err := run(t.Context(), args, io.Discard, io.Discard); err == nil {
@@ -511,5 +517,261 @@ func TestOutputFailure(t *testing.T) {
 	err := run(ctx, []string{"-B", cluster.ListenAddrs()[0], "events", "-o", "start"}, failedWriter{}, io.Discard)
 	if !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("output failure returned %v", err)
+	}
+}
+
+func TestGrepBeforeMessagePack(t *testing.T) {
+	cleanSASLEnv(t)
+	cluster := kfake.MustCluster(kfake.SeedTopics(1, "events"))
+	defer cluster.Close()
+
+	producer, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer producer.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	packed := msgp.AppendString(nil, "selected")
+	records := []*kgo.Record{
+		{Topic: "events", Key: []byte("user-456"), Value: []byte{0xc1}},
+		{Topic: "events", Key: []byte("user-123"), Value: packed},
+		{Topic: "events", Key: []byte("user-123-extra"), Value: []byte{0xc1}},
+	}
+	if err := producer.ProduceSync(ctx, records...).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+
+	producer.Close()
+	observeReads(t, cluster)
+	for _, tc := range []struct {
+		name, valueFilter string
+		wantRecord        bool
+	}{
+		{"key before decoding", "", true},
+		{"value matches raw bytes", "v:selected", true},
+		{"value does not match decoded JSON", `v:^"selected"$`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"-B", strings.Join(cluster.ListenAddrs(), ","), "events", "-p", "0", "-o", ":end", "--msgpack", "-f", "json", "-G", "k:^user-123$"}
+			if tc.valueFilter != "" {
+				args = append(args, "-G", tc.valueFilter)
+			}
+
+			var stdout, stderr bytes.Buffer
+			if err := run(ctx, args, &stdout, &stderr); err != nil {
+				t.Fatal(err)
+			}
+
+			if stderr.Len() != 0 {
+				t.Fatalf("filtered values were decoded: %s", &stderr)
+			}
+
+			if !tc.wantRecord {
+				if stdout.Len() != 0 {
+					t.Fatalf("unexpected match: %s", &stdout)
+				}
+
+				return
+			}
+
+			if bytes.Count(stdout.Bytes(), []byte{'\n'}) != 1 {
+				t.Fatalf("expected one exact key match: %s", &stdout)
+			}
+
+			var record struct {
+				Key   []byte
+				Value string
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &record); err != nil {
+				t.Fatal(err)
+			}
+
+			if string(record.Key) != "user-123" || record.Value != "selected" {
+				t.Fatalf("unexpected record: %+v", record)
+			}
+		})
+	}
+}
+
+func TestGrepFilterKey(t *testing.T) {
+	filters, err := parseGrepFilters([]string{"k:^user-123$"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	match := matchAll(filters, &kgo.Record{Key: []byte("user-123")})
+	if !match {
+		t.Error("expected match for exact key")
+	}
+
+	match = matchAll(filters, &kgo.Record{Key: []byte("user-456")})
+	if match {
+		t.Error("expected no match for different key")
+	}
+}
+
+func TestGrepFilterValue(t *testing.T) {
+	filters, err := parseGrepFilters([]string{"v:error"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	match := matchAll(filters, &kgo.Record{Value: []byte("an error occurred")})
+	if !match {
+		t.Error("expected match for value containing error")
+	}
+
+	match = matchAll(filters, &kgo.Record{Value: []byte("all good")})
+	if match {
+		t.Error("expected no match for value without error")
+	}
+}
+
+func TestGrepFilterNegate(t *testing.T) {
+	filters, err := parseGrepFilters([]string{"!v:warning"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	match := matchAll(filters, &kgo.Record{Value: []byte("an error")})
+	if !match {
+		t.Error("expected match for value without warning")
+	}
+
+	match = matchAll(filters, &kgo.Record{Value: []byte("a warning here")})
+	if match {
+		t.Error("expected no match for value containing warning")
+	}
+}
+
+func TestGrepFilterHeaderKey(t *testing.T) {
+	filters, err := parseGrepFilters([]string{"hk:trace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := &kgo.Record{
+		Headers: []kgo.RecordHeader{
+			{Key: "trace-id", Value: []byte("abc")},
+		},
+	}
+	if !matchAll(filters, r) {
+		t.Error("expected match for header key matching trace")
+	}
+
+	r2 := &kgo.Record{
+		Headers: []kgo.RecordHeader{
+			{Key: "content-type", Value: []byte("json")},
+		},
+	}
+	if matchAll(filters, r2) {
+		t.Error("expected no match for header key not matching trace")
+	}
+}
+
+func TestGrepFilterHeaderValue(t *testing.T) {
+	filters, err := parseGrepFilters([]string{"hv:^abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := &kgo.Record{
+		Headers: []kgo.RecordHeader{
+			{Key: "trace-id", Value: []byte("abc123")},
+		},
+	}
+	if !matchAll(filters, r) {
+		t.Error("expected match for header value starting with abc")
+	}
+}
+
+func TestGrepFilterSpecificHeader(t *testing.T) {
+	filters, err := parseGrepFilters([]string{"h:trace-id=abc.*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := &kgo.Record{
+		Headers: []kgo.RecordHeader{
+			{Key: "trace-id", Value: []byte("abc123")},
+		},
+	}
+	if !matchAll(filters, r) {
+		t.Error("expected match for specific header")
+	}
+
+	r2 := &kgo.Record{
+		Headers: []kgo.RecordHeader{
+			{Key: "other-id", Value: []byte("abc123")},
+		},
+	}
+	if matchAll(filters, r2) {
+		t.Error("expected no match for wrong header name")
+	}
+}
+
+func TestGrepFilterTopic(t *testing.T) {
+	filters, err := parseGrepFilters([]string{`t:^logs\.`})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !matchAll(filters, &kgo.Record{Topic: "logs.app"}) {
+		t.Error("expected match for topic logs.app")
+	}
+	if matchAll(filters, &kgo.Record{Topic: "events"}) {
+		t.Error("expected no match for topic events")
+	}
+}
+
+func TestGrepFilterMultipleAND(t *testing.T) {
+	filters, err := parseGrepFilters([]string{"v:error", "!v:warning"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// matches both: has error, no warning
+	if !matchAll(filters, &kgo.Record{Value: []byte("an error occurred")}) {
+		t.Error("expected match: has error, no warning")
+	}
+
+	// fails first: no error
+	if matchAll(filters, &kgo.Record{Value: []byte("all good")}) {
+		t.Error("expected no match: no error")
+	}
+
+	// fails second: has both error and warning
+	if matchAll(filters, &kgo.Record{Value: []byte("error warning")}) {
+		t.Error("expected no match: has both error and warning")
+	}
+}
+
+func TestGrepFilterEmpty(t *testing.T) {
+	filters, err := parseGrepFilters(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No filters = match everything.
+	if !matchAll(filters, &kgo.Record{Value: []byte("anything")}) {
+		t.Error("no filters should match everything")
+	}
+}
+
+func TestGrepFilterErrors(t *testing.T) {
+	tests := []string{
+		"invalid",     // no prefix
+		"k:[invalid",  // bad regex
+		"h:noequals",  // h: without =
+		"x:something", // unknown prefix
+	}
+	for _, p := range tests {
+		_, err := parseGrepFilters([]string{p})
+		if err == nil {
+			t.Errorf("expected error for %q", p)
+		}
 	}
 }
