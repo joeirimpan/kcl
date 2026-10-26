@@ -170,6 +170,12 @@ offset commits, and topic auto-creation. Kafka 0.11 or newer is required.
 For independent enforcement, use a dedicated account with only topic
 READ/DESCRIBE permissions.
 
+## Sample agent skill
+
+[skills/kafka-consume/SKILL.md](skills/kafka-consume/SKILL.md) provides a generic
+workflow for agents to collect bounded samples, filter by key, and save JSON
+output. Adapt the connection details and record limits to your environment.
+
 ## Development
 
 ```sh
