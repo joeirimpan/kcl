@@ -1,4 +1,4 @@
-module github.com/twmb/kcl
+module github.com/joeirimpan/kcl
 
 go 1.27
 

@@ -13,6 +13,32 @@ This replaces the previous multi-command CLI. Topics are positional arguments;
 there is no `consume` subcommand. Old configuration files, profiles, and `-X`
 overrides are no longer loaded. Use `--help` for the complete flag list.
 
+## Flags
+
+Usage: `kcl [flags] TOPIC [TOPIC...]`. Examples below are flag fragments to add
+to a command, such as `/tmp/kcl events -o :end -n 50 -f json`.
+
+| Flag | Purpose and default | Example use |
+| --- | --- | --- |
+| `-B`, `--brokers` | Comma-separated bootstrap brokers; default `localhost:9092`. | `-B broker1:9092,broker2:9092` |
+| `--broker-map` | Map an advertised broker address to a forwarded address; repeat for each broker. | `--broker-map broker1:9092=127.0.0.1:19092` |
+| `-p`, `--partitions` | Comma-separated partition IDs; default all existing partitions of each topic. | `-p 0,2` |
+| `-o`, `--offset` | Starting offset or bounded range; default `end` (new records). | `-o :end` or `-o '@-30m:end'` |
+| `-n`, `--num` | Maximum total records printed after filtering; default `0` (unlimited). | `-n 50` |
+| `--timeout` | Idle timeout; default `30s`. `0` waits indefinitely. | `--timeout 10s` |
+| `-f`, `--format` | Record template or `json`; default `%v\n` (value and newline). | `-f json` or `-f '%t[%p]@%o %k\t%v\n'` |
+| `-G`, `--grep` | Local regex filter; repeat to require all filters to match. Default no filtering. | `-G 'k:^user-123$' -G '!v:warning'` |
+| `--msgpack` | Decode MessagePack values into JSON; default off. | `--msgpack -f json` |
+| `--sasl-mechanism` | `plain`, `scram-sha-256`, or `scram-sha-512`; defaults to `KCL_SASL_MECHANISM`, or PLAIN when credentials are supplied. | `--sasl-mechanism scram-sha-256` |
+| `--sasl-user` | SASL username; defaults to `KCL_SASL_USER`. Password comes from `KCL_SASL_PASS`. | `--sasl-user reader` |
+| `--tls` | Enable TLS with certificate verification and system CAs; default off. | `--tls` |
+| `--tls-ca` | Use a PEM CA bundle; also enables TLS. | `--tls-ca ca.pem` |
+| `--tls-cert` | Client certificate PEM for mutual TLS; requires `--tls-key` and enables TLS. | `--tls-cert client.pem --tls-key client-key.pem` |
+| `--tls-key` | Client private key PEM; requires `--tls-cert`. | `--tls-key client-key.pem --tls-cert client.pem` |
+| `--tls-server-name` | Override the verified TLS hostname; also enables TLS. Default is the original broker hostname. | `--tls-server-name broker.example` |
+| `-h`, `--help` | Print help and exit; no topic required. | `/tmp/kcl --help` |
+| `--version` | Print the version and exit; no topic required. | `/tmp/kcl --version` |
+
 ## Reading
 
 The default offset is `end` (new records). Without `-p`, all existing partitions
@@ -137,20 +163,12 @@ TLS uses system CAs, or `--tls-ca ca.pem`. Mutual TLS uses
 `--tls-cert client.pem --tls-key client-key.pem`. Certificate verification
 cannot be disabled.
 
-## Read-only boundary
+## Read-only guarantees
 
-Every broker connection rejects requests except Fetch, ListOffsets, Metadata,
-OffsetForLeaderEpoch, ApiVersions, SASLHandshake, and SASLAuthenticate.
-Metadata must explicitly disable topic auto-creation. Partial, combined,
-malformed, and unknown request frames are rejected before any bytes are sent.
-The guard also applies to TLS connections and blocks accidental producer calls
-inside the underlying Kafka library. There is no flag to disable it.
-
-Kafka 0.11 or newer is required: older Metadata versions cannot explicitly
-disable auto-creation, and legacy unframed SASL authentication is rejected.
-Use a dedicated account with broker-enforced topic READ/DESCRIBE permissions
-and no group, write, or administrative grants for independent enforcement.
-Authentication alone does not restrict an account's permissions.
+kcl only reads records and metadata. A connection-level guard blocks writes,
+offset commits, and topic auto-creation. Kafka 0.11 or newer is required.
+For independent enforcement, use a dedicated account with only topic
+READ/DESCRIBE permissions.
 
 ## Development
 
